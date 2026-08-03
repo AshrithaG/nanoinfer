@@ -1,4 +1,5 @@
 // Dependency-free test harness. No network fetch in CI, no framework to learn.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>

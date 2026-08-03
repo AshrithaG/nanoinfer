@@ -7,6 +7,7 @@
 #include "nanoinfer/pool.h"
 
 #include <algorithm>
+#include <functional>
 
 namespace ni {
 

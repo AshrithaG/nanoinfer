@@ -13,7 +13,8 @@ target_include_directories(nanoinfer PUBLIC include)
 
 # Accelerate gives us a tuned sgemm on Apple platforms. Without it the blocked
 # fallback in ops.cpp is used, which is the honest baseline for the comparison.
-if(APPLE)
+option(NI_WITH_ACCELERATE "Use Apple Accelerate for sgemm when available" ON)
+if(APPLE AND NI_WITH_ACCELERATE)
   find_library(ACCELERATE Accelerate)
   if(ACCELERATE)
     target_link_libraries(nanoinfer PUBLIC ${ACCELERATE})

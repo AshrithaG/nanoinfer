@@ -5,8 +5,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <stdexcept>
-#include <thread>
 #include <vector>
 
 #if defined(NI_USE_ACCELERATE)
