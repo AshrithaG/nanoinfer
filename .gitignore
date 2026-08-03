@@ -1,0 +1,10 @@
+build/
+.venv/
+__pycache__/
+*.pyc
+.ruff_cache/
+.DS_Store
+models/*.ngm
+models/*.bin
+results/*.onnx
+uv.lock

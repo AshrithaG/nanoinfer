@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # The C++ tests have no dependencies and no network calls, so they run
+  # everywhere. This also exercises the non-Accelerate GEMM fallback.
+  cpp:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build -j
+      - run: ./build/ni_test
+
+  # Parity against PyTorch: the only check that can catch a kernel that is fast
+  # and wrong.
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.12
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+      - run: uv sync
+      - run: uv run ruff check tools/
+      - run: uv run python -m tools.parity --quantized

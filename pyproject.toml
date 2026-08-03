@@ -1,0 +1,24 @@
+[project]
+name = "nanoinfer-tools"
+version = "0.1.0"
+description = "Exporter, parity harness and benchmark tooling for the nanoinfer engine"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "torch>=2.4",
+    "numpy>=1.26",
+    "onnx>=1.16",
+    "onnxruntime>=1.18",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.setuptools]
+py-modules = []
