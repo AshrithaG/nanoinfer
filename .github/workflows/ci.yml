@@ -28,6 +28,6 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv python install 3.12
       - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
-      - run: uv sync
+      - run: uv sync --extra dev
       - run: uv run ruff check tools/
       - run: uv run python -m tools.parity --quantized
