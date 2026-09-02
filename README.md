@@ -4,9 +4,11 @@ A neural-network inference engine written from scratch in C++: own tensors, own
 convolution kernels, own memory planner, own int8 quantization. No runtime
 dependencies beyond a BLAS `sgemm` and a thread library.
 
-There is also an optional CUDA backend, built separately, where a hand-written
-int8 GEMM is measured against cuBLAS: ahead of it up to n=1024, about 30% behind
-at 4096. See [on the GPU](#on-the-gpu).
+There is also an optional CUDA backend, built separately: a hand-written int8
+GEMM measured against cuBLAS, ahead of it up to n=1024 and about 30% behind at
+4096, and a fused fp32 convolution measured against cuDNN, ahead on three of
+four edge-CNN layer shapes and 3x behind on the fourth. See
+[on the GPU](#on-the-gpu).
 
 It targets edge-sized CNNs, the kind that run on a phone or a
 microcontroller-class budget, and it is fast enough to be measured honestly
@@ -257,6 +259,60 @@ I could not confirm any of this with Nsight Compute: GPU performance counters
 are restricted to admin users on the machine I have access to, so the bandwidth
 figure above is computed from launch geometry and measured time rather than read
 off a profiler. That is the honest state of the analysis.
+
+### Fused convolution against cuDNN
+
+The CPU engine runs bias and activation as a separate pass over the output
+tensor, which the [what is still slow](#what-is-still-slow) section above lists
+as one of its weaknesses. On a GPU that cost is easy to isolate: the unfused
+path writes the output, then reads and writes it again for bias, then a third
+time for ReLU. The fused and unfused kernels here are the same template with the
+epilogue switched on or off, so the difference between those two rows is only
+the memory traffic.
+
+Shapes are the kind an edge CNN is made of, not the kind a benchmark suite
+usually reports. fp32, NCHW, batch 1. `./build-cuda/ni_bench_conv`.
+
+| layer | direct | +fused | +smem | cuDNN unfused | cuDNN fused | cuDNN fused f32 | mine vs cuDNN |
+|---|---|---|---|---|---|---|---|
+| first 3x3, 3 to 32, 96x96 | 0.0158 | 0.0106 | **0.0096** | 0.0312 | 0.0305 | 0.0302 | **3.15x** |
+| mid 3x3, 64 to 64, 56x56 | 0.1283 | 0.1189 | **0.1062** | 0.0586 | 0.0635 | **0.0355** | 0.33x |
+| pointwise 1x1, 128 to 128, 28x28 | 0.0542 | 0.0490 | **0.0353** | 0.0421 | 0.0435 | 0.0431 | **1.22x** |
+| depthwise 3x3, 128, 28x28 | 0.0072 | **0.0035** | n/a | 0.0219 | 0.0215 | 0.0211 | **6.02x** |
+
+Milliseconds, median of 50 launches. Every implementation is checked against the
+direct kernel's output before timing.
+
+**Fusion is worth most where the convolution is smallest.** 1.08x on the mid 3x3
+but 2.06x on the depthwise layer. That ordering is the whole point: the
+depthwise layer is only 1.8 MFLOP against the same output tensor size, so it is
+almost entirely epilogue, and removing two passes over that tensor nearly halves
+the runtime. The compute-heavy 3x3 hides its epilogue behind arithmetic.
+
+**Staging the filter in shared memory is worth up to 1.39x.** Every thread in
+the direct kernel re-reads the same filter from global memory; a 128-channel
+pointwise layer is 64 KB of weights re-read per block. Staging it once per block
+fixes that. The kernel declines depthwise layers, where each output channel has
+its own 3x3 filter and there is nothing for a block to share.
+
+**Three wins and one clear loss, and the pattern is not an accident.** The
+hand-written kernels beat cuDNN on the first layer, the pointwise layer and the
+depthwise layer, and lose by 3x on the conventional 64-to-64 3x3. cuDNN's
+algorithms assume large batches and wide channels; on a 3-channel input or a
+depthwise layer it is running machinery shaped for a workload that is not there.
+On the one shape its heuristics were built for, it is three times faster than
+anything here, and closing that would mean implicit GEMM with proper tiling
+rather than a direct convolution.
+
+**cuDNN's default math mode was both slower and less accurate.** On the mid 3x3,
+leaving cuDNN on `CUDNN_DEFAULT_MATH` produced 7.76e-03 relative error against
+our fp32 reference, because on Ampere and later it silently promotes fp32
+convolution to TF32 tensor cores, which keep 10 mantissa bits instead of 23.
+Forcing `CUDNN_FMA_MATH` made it exact *and* dropped it from 0.0635 ms to
+0.0355 ms. The math type does not only choose the arithmetic, it changes which
+internal kernel gets selected, and here the default picked a worse one. The
+comparison column above uses the true-fp32 row, since that is the only vendor
+result computing the same arithmetic these kernels do.
 
 ### Where the vendor library declines
 

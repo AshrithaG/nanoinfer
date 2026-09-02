@@ -60,7 +60,7 @@ if(NI_WITH_CUDA)
   set(CMAKE_CUDA_STANDARD 17)
   set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-  add_library(nanoinfer_cuda src/cuda/gemm_i8.cu)
+  add_library(nanoinfer_cuda src/cuda/gemm_i8.cu src/cuda/conv_fused.cu)
   target_include_directories(nanoinfer_cuda PUBLIC include)
   target_compile_definitions(nanoinfer_cuda PUBLIC NI_WITH_CUDA)
   set_target_properties(nanoinfer_cuda PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
@@ -68,8 +68,40 @@ if(NI_WITH_CUDA)
   find_package(CUDAToolkit REQUIRED)
   target_link_libraries(nanoinfer_cuda PUBLIC CUDA::cublas CUDA::cudart)
 
+  # cuDNN is not part of the CUDA toolkit. Point NI_CUDNN_ROOT at a directory
+  # containing include/cudnn.h and lib/libcudnn.so; a pip install of
+  # nvidia-cudnn-cu12 inside a venv works and needs no root.
+  set(NI_CUDNN_ROOT "" CACHE PATH "Root of a cuDNN install (include/ and lib/)")
+  if(NI_CUDNN_ROOT AND EXISTS "${NI_CUDNN_ROOT}/include/cudnn.h")
+    # pip's cuDNN wheels ship libcudnn.so.9 with no unversioned symlink, which
+    # plain -lcudnn cannot find, so locate the actual file.
+    find_library(NI_CUDNN_LIB NAMES cudnn PATHS "${NI_CUDNN_ROOT}/lib" NO_DEFAULT_PATH)
+    if(NOT NI_CUDNN_LIB)
+      file(GLOB _ni_cudnn_so "${NI_CUDNN_ROOT}/lib/libcudnn.so*")
+      if(_ni_cudnn_so)
+        list(GET _ni_cudnn_so 0 NI_CUDNN_LIB)
+      endif()
+    endif()
+  endif()
+  if(NI_CUDNN_LIB)
+    message(STATUS "cuDNN: ${NI_CUDNN_LIB}")
+    target_include_directories(nanoinfer_cuda PUBLIC "${NI_CUDNN_ROOT}/include")
+    target_link_libraries(nanoinfer_cuda PUBLIC "${NI_CUDNN_LIB}")
+    target_compile_definitions(nanoinfer_cuda PUBLIC NI_WITH_CUDNN)
+    set_target_properties(nanoinfer_cuda PROPERTIES
+      BUILD_RPATH "${NI_CUDNN_ROOT}/lib" INSTALL_RPATH "${NI_CUDNN_ROOT}/lib")
+  else()
+    message(STATUS "cuDNN: not found, conv benchmark will skip the vendor rows")
+  endif()
+
   add_executable(ni_bench_cuda bench/bench_cuda.cu)
   target_link_libraries(ni_bench_cuda PRIVATE nanoinfer_cuda)
+
+  add_executable(ni_bench_conv bench/bench_conv.cu)
+  target_link_libraries(ni_bench_conv PRIVATE nanoinfer_cuda)
+  if(NI_CUDNN_LIB)
+    set_target_properties(ni_bench_conv PROPERTIES BUILD_RPATH "${NI_CUDNN_ROOT}/lib")
+  endif()
 endif()
 
 add_executable(ni_test tests/test_main.cpp)

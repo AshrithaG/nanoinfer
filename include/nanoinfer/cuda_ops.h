@@ -44,6 +44,48 @@ double time_gemm_i8(int M, int N, int K,
                     const int8_t* dA, const int8_t* dB, int32_t* dC,
                     I8GemmImpl impl, int iters);
 
+
+// ---------------------------------------------------------------- conv2d
+// fp32 NCHW convolution with optional fused bias and ReLU. The CPU engine runs
+// bias and activation as a separate pass over the output tensor; on a GPU that
+// pass is pure memory traffic, so fusing it is worth measuring directly.
+enum class ConvImplCuda {
+  Direct,       // conv only, one thread per output element
+  DirectFused,  // + bias and ReLU folded into the same store
+  SmemFused,    // + weights staged in shared memory
+  CudnnUnfused,  // cudnnConvolutionForward, then bias, then ReLU
+  CudnnFused,    // cudnnConvolutionBiasActivationForward
+  CudnnFusedF32, // the same, forced to true fp32 instead of TF32
+};
+
+const char* conv_impl_name(ConvImplCuda impl);
+
+struct ConvShape {
+  int N, C, H, W;   // input
+  int K, R, S;      // output channels, kernel height/width
+  int stride, pad;
+  bool depthwise;   // groups == C
+  int out_h() const { return (H + 2 * pad - R) / stride + 1; }
+  int out_w() const { return (W + 2 * pad - S) / stride + 1; }
+  size_t out_elems() const {
+    return size_t(N) * (depthwise ? C : K) * out_h() * out_w();
+  }
+  size_t in_elems() const { return size_t(N) * C * H * W; }
+  size_t w_elems() const {
+    return depthwise ? size_t(C) * R * S : size_t(K) * C * R * S;
+  }
+};
+
+// Runs the convolution. Returns false if the implementation declines the shape.
+bool conv2d_f32(const ConvShape& s, const float* dX, const float* dW,
+                const float* dBias, float* dY, bool relu, ConvImplCuda impl);
+
+double time_conv2d_f32(const ConvShape& s, const float* dX, const float* dW,
+                       const float* dBias, float* dY, bool relu,
+                       ConvImplCuda impl, int iters);
+
+bool cudnn_available();
+
 struct DeviceInfo {
   char name[256];
   int major, minor, sms;
