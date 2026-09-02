@@ -375,6 +375,60 @@ DeviceInfo device_info() {
   return d;
 }
 
+
+namespace {
+inline void check_probe(cudaError_t e) {
+  if (e != cudaSuccess) {
+    std::fprintf(stderr, "cuda probe error: %s\n", cudaGetErrorString(e));
+  }
+}
+}  // namespace
+
+// ------------------------------------------------------ occupancy reporting
+namespace {
+
+// Everything here comes from the CUDA runtime, not from a profiler. On a shared
+// machine GPU performance counters are usually restricted to root, but these
+// two calls are not, and they give the same theoretical occupancy figure Nsight
+// reports on its first page.
+template <typename Fn>
+KernelInfo probe_kernel(const char* name, Fn fn, int block_size, size_t dyn_shared) {
+  cudaFuncAttributes attr{};
+  check_probe(cudaFuncGetAttributes(&attr, reinterpret_cast<const void*>(fn)));
+
+  int blocks = 0;
+  check_probe(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+      &blocks, reinterpret_cast<const void*>(fn), block_size, dyn_shared));
+
+  cudaDeviceProp prop{};
+  check_probe(cudaGetDeviceProperties(&prop, 0));
+
+  KernelInfo k{};
+  std::snprintf(k.name, sizeof(k.name), "%s", name);
+  k.regs = attr.numRegs;
+  k.static_shared = static_cast<int>(attr.sharedSizeBytes);
+  k.dynamic_shared = static_cast<int>(dyn_shared);
+  k.block_size = block_size;
+  k.blocks_per_sm = blocks;
+  k.occupancy = prop.maxThreadsPerMultiProcessor
+                    ? double(blocks * block_size) / prop.maxThreadsPerMultiProcessor
+                    : 0.0;
+  return k;
+}
+
+}  // namespace
+
+int gemm_kernel_report(KernelInfo* out, int cap) {
+  int n = 0;
+  const int T = kTile * kTile;  // 32x32 = 1024 threads for the CUDA-core kernels
+  if (n < cap) out[n++] = probe_kernel("gemm naive", k_naive, T, 0);
+  if (n < cap) out[n++] = probe_kernel("gemm tiled", k_tiled, T, 0);
+  if (n < cap) out[n++] = probe_kernel("gemm tiled+dp4a", k_tiled_dp4a, T, 0);
+  if (n < cap) out[n++] = probe_kernel("gemm wmma", k_wmma, 128, 0);
+  if (n < cap) out[n++] = probe_kernel("gemm wmma+smem", k_wmma_smem, 128, 0);
+  return n;
+}
+
 }  // namespace ni::cuda
 
 #endif  // NI_WITH_CUDA

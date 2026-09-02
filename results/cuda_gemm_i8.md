@@ -12,3 +12,19 @@ against a CPU int32 reference on 61x76x132, 64x80x128 and 128x128x256 first.
 | 4096 | 24.746 | 30.464 | 18.344 | 5.142 | 1.119 | 0.797 | 122.81 | 0.71x |
 
 Reproduce: `cmake -B build-cuda -DNI_WITH_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89 && ./build-cuda/ni_bench_cuda`
+
+## Kernel resources and theoretical occupancy
+
+From cudaFuncGetAttributes and cudaOccupancyMaxActiveBlocksPerMultiprocessor.
+No profiler permissions required.
+
+| kernel | regs/thread | shared B | block | blocks/SM | occupancy |
+|---|---|---|---|---|---|
+| gemm naive | 38 | 0 | 1024 | 1 | 67% |
+| gemm tiled | 37 | 2048 | 1024 | 1 | 67% |
+| gemm tiled+dp4a | 37 | 2048 | 1024 | 1 | 67% |
+| gemm wmma | 40 | 0 | 128 | 12 | 100% |
+| gemm wmma+smem | 70 | 4096 | 128 | 7 | 58% |
+| conv direct | 38 | 0 | 256 | 6 | 100% |
+| conv direct+fused | 38 | 0 | 256 | 6 | 100% |
+| conv smem+fused | 40 | 4608 | 256 | 6 | 100% |

@@ -115,6 +115,24 @@ void sweep() {
   }
 }
 
+
+void resources() {
+  KernelInfo k[16];
+  int n = gemm_kernel_report(k, 8);
+  n += conv_kernel_report(k + n, 16 - n);
+
+  std::printf("\nkernel resources and theoretical occupancy\n");
+  std::printf("(from cudaFuncGetAttributes and cudaOccupancyMaxActiveBlocksPerMultiprocessor,\n");
+  std::printf(" which need no profiler permissions)\n\n");
+  std::printf("%-20s%8s%10s%10s%12s%12s\n", "kernel", "regs", "smem B", "block", "blocks/SM", "occupancy");
+  std::printf("--------------------------------------------------------------------------\n");
+  for (int i = 0; i < n; ++i) {
+    std::printf("%-20s%8d%10d%10d%12d%11.0f%%\n", k[i].name, k[i].regs,
+                k[i].static_shared + k[i].dynamic_shared, k[i].block_size,
+                k[i].blocks_per_sm, k[i].occupancy * 100.0);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -128,6 +146,7 @@ int main() {
     return 1;
   }
   sweep();
+  resources();
   std::printf("\nvs cuBLAS > 1.00x means the hand-written kernel wins.\n");
   return 0;
 }

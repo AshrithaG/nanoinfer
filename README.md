@@ -255,10 +255,57 @@ Roughly 30% behind cuBLAS at 2048 and above, in the order I would attack it:
 - **One K-stage in flight.** No double buffering, so there is nothing to hide
   latency behind even within a single stage.
 
-I could not confirm any of this with Nsight Compute: GPU performance counters
-are restricted to admin users on the machine I have access to, so the bandwidth
-figure above is computed from launch geometry and measured time rather than read
-off a profiler. That is the honest state of the analysis.
+The bandwidth figure above is computed from launch geometry and measured time,
+not read off a profiler; see [resource use and occupancy](#resource-use-and-occupancy)
+for what could and could not be measured on this machine.
+
+### Resource use and occupancy
+
+GPU performance counters are restricted to root on the machine this was measured
+on, so there is no Nsight Compute output here. Theoretical occupancy and per
+kernel resource use do not need counters: `cudaFuncGetAttributes` and
+`cudaOccupancyMaxActiveBlocksPerMultiprocessor` report them from the runtime,
+and that is what the benchmark prints.
+
+| kernel | regs/thread | shared B | block | blocks/SM | occupancy |
+|---|---|---|---|---|---|
+| gemm naive | 38 | 0 | 1024 | 1 | 67% |
+| gemm tiled | 37 | 2048 | 1024 | 1 | 67% |
+| gemm tiled+dp4a | 37 | 2048 | 1024 | 1 | 67% |
+| gemm wmma | 40 | 0 | 128 | 12 | 100% |
+| gemm wmma+smem | 70 | 4096 | 128 | 7 | 58% |
+| conv direct | 38 | 0 | 256 | 6 | 100% |
+| conv direct+fused | 38 | 0 | 256 | 6 | 100% |
+| conv smem+fused | 40 | 4608 | 256 | 6 | 100% |
+
+Three things fall out of this table.
+
+**The fastest kernel has the lowest occupancy.** `wmma+smem` runs at 58% against
+`wmma` at 100%, and is 4.6x faster. The four accumulator fragments per warp that
+make it fast are also what push it to 70 registers per thread, which is what
+limits it to 7 blocks per SM. Occupancy is a means of hiding latency, not a
+goal; here the extra work per thread hides more latency than extra threads would
+have. Tuning for the occupancy number alone would have made this kernel slower.
+
+**The CUDA-core kernels are capped at 67% by an arbitrary choice.** A 32x32 tile
+is 1024 threads, and an Ada SM holds 1536, so exactly one block fits and a third
+of the SM is idle by construction. A 16x16 tile would fit six blocks and reach
+100%. Whether that would actually be faster is untested: those kernels are
+bandwidth-bound, so more resident warps may not help. It is the first thing to
+try if anyone wants to push the CUDA-core ladder further.
+
+**The convolution kernels are all at 100%,** which locates the 3x loss to cuDNN
+on the mid 3x3 somewhere other than occupancy. It is algorithmic: a direct
+convolution against cuDNN's implicit GEMM, which turns the problem into a matrix
+multiply and gets to reuse a tiled GEMM that is far better optimized than
+anything here.
+
+**What is out of scope.** Achieved occupancy, DRAM throughput, tensor-core
+utilization and warp stall reasons all require hardware counters, and therefore
+root, which was not available. The bandwidth figures quoted above are computed
+from launch geometry and measured time rather than read off a profiler, and the
+occupancy figures are theoretical rather than achieved. Both are stated as such
+wherever they appear.
 
 ### Fused convolution against cuDNN
 

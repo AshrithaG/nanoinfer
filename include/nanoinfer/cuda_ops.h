@@ -86,6 +86,24 @@ double time_conv2d_f32(const ConvShape& s, const float* dX, const float* dW,
 
 bool cudnn_available();
 
+// Per-kernel resource use and theoretical occupancy, read from the CUDA runtime
+// rather than a profiler. cudaFuncGetAttributes and
+// cudaOccupancyMaxActiveBlocksPerMultiprocessor need no elevated permissions,
+// which matters on shared machines where GPU performance counters are
+// restricted to root.
+struct KernelInfo {
+  char name[48];
+  int regs;             // registers per thread
+  int static_shared;    // bytes of static shared memory per block
+  int dynamic_shared;   // bytes of dynamic shared memory per block, as launched
+  int block_size;       // threads per block, as launched
+  int blocks_per_sm;    // concurrent blocks the SM can host
+  double occupancy;     // resident warps / maximum resident warps
+};
+
+int gemm_kernel_report(KernelInfo* out, int cap);
+int conv_kernel_report(KernelInfo* out, int cap);
+
 struct DeviceInfo {
   char name[256];
   int major, minor, sms;

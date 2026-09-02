@@ -358,6 +358,60 @@ double time_conv2d_f32(const ConvShape& s, const float* dX, const float* dW,
   return static_cast<double>(ms) / iters;
 }
 
+
+namespace {
+inline void check_probe(cudaError_t e) {
+  if (e != cudaSuccess) {
+    std::fprintf(stderr, "cuda probe error: %s\n", cudaGetErrorString(e));
+  }
+}
+}  // namespace
+
+// ------------------------------------------------------ occupancy reporting
+namespace {
+
+// Everything here comes from the CUDA runtime, not from a profiler. On a shared
+// machine GPU performance counters are usually restricted to root, but these
+// two calls are not, and they give the same theoretical occupancy figure Nsight
+// reports on its first page.
+template <typename Fn>
+KernelInfo probe_kernel(const char* name, Fn fn, int block_size, size_t dyn_shared) {
+  cudaFuncAttributes attr{};
+  check_probe(cudaFuncGetAttributes(&attr, reinterpret_cast<const void*>(fn)));
+
+  int blocks = 0;
+  check_probe(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+      &blocks, reinterpret_cast<const void*>(fn), block_size, dyn_shared));
+
+  cudaDeviceProp prop{};
+  check_probe(cudaGetDeviceProperties(&prop, 0));
+
+  KernelInfo k{};
+  std::snprintf(k.name, sizeof(k.name), "%s", name);
+  k.regs = attr.numRegs;
+  k.static_shared = static_cast<int>(attr.sharedSizeBytes);
+  k.dynamic_shared = static_cast<int>(dyn_shared);
+  k.block_size = block_size;
+  k.blocks_per_sm = blocks;
+  k.occupancy = prop.maxThreadsPerMultiProcessor
+                    ? double(blocks * block_size) / prop.maxThreadsPerMultiProcessor
+                    : 0.0;
+  return k;
+}
+
+}  // namespace
+
+int conv_kernel_report(KernelInfo* out, int cap) {
+  int n = 0;
+  // The smem kernel's shared use is dynamic and shape dependent; 128 channels
+  // of 3x3 fp32 weights is the pointwise/mid case in the benchmark.
+  const size_t smem_bytes = size_t(128) * 3 * 3 * sizeof(float);
+  if (n < cap) out[n++] = probe_kernel("conv direct", k_conv<false>, kThreads, 0);
+  if (n < cap) out[n++] = probe_kernel("conv direct+fused", k_conv<true>, kThreads, 0);
+  if (n < cap) out[n++] = probe_kernel("conv smem+fused", k_conv_smem, kThreads, smem_bytes);
+  return n;
+}
+
 }  // namespace ni::cuda
 
 #endif  // NI_WITH_CUDA
