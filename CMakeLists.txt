@@ -46,6 +46,32 @@ if(NI_HAVE_DOTPROD)
   target_compile_definitions(nanoinfer PRIVATE NI_USE_DOTPROD)
 endif()
 
+# ---------------------------------------------------------------- CUDA backend
+# Off by default so the CPU build stays dependency-free. Enable with
+#   cmake -B build-cuda -DNI_WITH_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89
+# On machines where /usr/local/cuda points at a toolkit whose headers clash with
+# the system glibc, pass -DCMAKE_CUDA_COMPILER=/usr/bin/nvcc explicitly.
+option(NI_WITH_CUDA "Build the CUDA backend and its benchmark" OFF)
+if(NI_WITH_CUDA)
+  if(NOT CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES 89)  # Ada, RTX 4090
+  endif()
+  enable_language(CUDA)
+  set(CMAKE_CUDA_STANDARD 17)
+  set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+  add_library(nanoinfer_cuda src/cuda/gemm_i8.cu)
+  target_include_directories(nanoinfer_cuda PUBLIC include)
+  target_compile_definitions(nanoinfer_cuda PUBLIC NI_WITH_CUDA)
+  set_target_properties(nanoinfer_cuda PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+  find_package(CUDAToolkit REQUIRED)
+  target_link_libraries(nanoinfer_cuda PUBLIC CUDA::cublas CUDA::cudart)
+
+  add_executable(ni_bench_cuda bench/bench_cuda.cu)
+  target_link_libraries(ni_bench_cuda PRIVATE nanoinfer_cuda)
+endif()
+
 add_executable(ni_test tests/test_main.cpp)
 target_link_libraries(ni_test PRIVATE nanoinfer)
 
