@@ -97,6 +97,13 @@ if(NI_WITH_CUDA)
   add_executable(ni_bench_cuda bench/bench_cuda.cu)
   target_link_libraries(ni_bench_cuda PRIVATE nanoinfer_cuda)
 
+  # The same int8 GEMM kernels as a shared library, so tools/triton_gemm.py can
+  # time them next to Triton and cuBLAS in one process. See bench/gemm_shim.cu.
+  add_library(ni_gemm_shim SHARED bench/gemm_shim.cu)
+  target_include_directories(ni_gemm_shim PRIVATE include)
+  target_compile_definitions(ni_gemm_shim PRIVATE NI_WITH_CUDA)
+  target_link_libraries(ni_gemm_shim PRIVATE CUDA::cublas CUDA::cudart)
+
   add_executable(ni_bench_conv bench/bench_conv.cu)
   target_link_libraries(ni_bench_conv PRIVATE nanoinfer_cuda)
   if(NI_CUDNN_LIB)

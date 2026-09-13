@@ -1,4 +1,4 @@
-# fp32 NCHW conv + bias + ReLU on RTX 4090 (sm_89), median ms of 50 launches
+# fp32 NCHW conv + bias + ReLU on RTX 4090 (sm_89), mean ms over 50 back-to-back launches
 
 Batch 1. All implementations verified against the direct kernel's output.
 cuDNN "fused f32" forces CUDNN_FMA_MATH; the other cuDNN rows use the default,
