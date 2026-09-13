@@ -5,9 +5,12 @@ convolution kernels, own memory planner, own int8 quantization. No runtime
 dependencies beyond a BLAS `sgemm` and a thread library.
 
 There is also an optional CUDA backend, built separately: a hand-written int8
-GEMM measured against cuBLAS, ahead of it up to n=1024 and about 30% behind at
-4096, and a fused fp32 convolution measured against cuDNN, ahead on three of
-four edge-CNN layer shapes and 3x behind on the fourth. See
+GEMM, the same GEMM written in Triton, and a fused fp32 convolution measured
+against cuDNN, ahead on three of four edge-CNN layer shapes and 3x behind on the
+fourth. The int8 result contains a correction worth reading first: the
+hand-written kernel was ahead of cuBLAS up to n=1024 only as I was calling
+cuBLAS. Given its preferred operand layout, cuBLAS is 1.6x to 4.5x faster at
+every size, and the Triton version matches it at n=4096. See
 [on the GPU](#on-the-gpu).
 
 It targets edge-sized CNNs, the kind that run on a phone or a
@@ -191,10 +194,10 @@ Build it with `cmake -B build-cuda -DNI_WITH_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=
 and run `./build-cuda/ni_bench_cuda`. Every implementation is checked against a
 CPU int32 reference on three shapes before anything is timed.
 
-RTX 4090, sm_89, C[n,n] int32 = A[n,n] int8 * B[n,n] int8, median of 10 to 200
-timed launches depending on size.
+RTX 4090, sm_89, C[n,n] int32 = A[n,n] int8 * B[n,n] int8, mean of 10 to 200
+back-to-back launches between two CUDA events, depending on size.
 
-| n | naive | tiled | tiled+dp4a | wmma | wmma+smem | cuBLAS | best TOPS | vs cuBLAS |
+| n | naive | tiled | tiled+dp4a | wmma | wmma+smem | cuBLAS (NN) | best TOPS | vs cuBLAS (NN) |
 |---|---|---|---|---|---|---|---|---|
 | 256 | 0.015 ms | 0.017 ms | 0.011 ms | **0.004 ms** | 0.006 ms | 0.009 ms | 7.7 | **2.09x** |
 | 512 | 0.055 ms | 0.062 ms | 0.039 ms | **0.008 ms** | 0.010 ms | 0.010 ms | 33.1 | **1.26x** |
@@ -202,7 +205,9 @@ timed launches depending on size.
 | 2048 | 3.251 ms | 3.552 ms | 2.208 ms | 0.329 ms | **0.145 ms** | 0.106 ms | 118.7 | 0.73x |
 | 4096 | 24.746 ms | 30.464 ms | 18.344 ms | 5.142 ms | **1.119 ms** | 0.797 ms | 122.8 | 0.71x |
 
-Ahead of cuBLAS up to 1024, behind it by about 30% at 2048 and 4096.
+Ahead of cuBLAS as called here up to 1024, and about 30% behind at 2048 and
+4096. "As called here" turned out to matter; see
+[against cuBLAS's fast path](#against-cublass-fast-path).
 
 ### What the ladder is made of
 
@@ -237,23 +242,103 @@ issuing tensor-core instructions. Staging tiles through shared memory and giving
 each warp a 32x32 output tile (four accumulator fragments instead of one) made
 each fetched byte feed sixteen times more math, and the runtime fell to 1.119 ms.
 
-### What is still slow
+### What was still slow, tested
 
-Roughly 30% behind cuBLAS at 2048 and above, in the order I would attack it:
+Roughly 30% behind cuBLAS at 2048 and above. I ranked the causes in the order I
+would attack them, then tested the ranking instead of attacking: a Triton kernel
+can be written at exactly this kernel's tiling (64x64 blocks, 32-wide K tiles, 4
+warps) and changed one knob at a time. The ranking was:
 
-- **No overlap between loading and computing.** Global to shared staging and the
-  MMA sequence are separated by `__syncthreads`, so the SM idles during each
-  stage load. cuBLAS uses `cp.async` to prefetch the next K-slice while the
-  current one is being multiplied. This is almost certainly the largest single
-  item.
-- **The block tile is too small.** 64x64 per block and 32x32 per warp. cuBLAS
-  runs 128x128 or larger, which raises arithmetic intensity per staged byte and
-  amortizes the fixed cost of each stage over more math.
-- **No shared-memory swizzling.** Fragment loads read the staging buffers in a
-  pattern that almost certainly conflicts on banks; a swizzled layout is the
-  standard fix and I have not measured how much it is costing.
-- **One K-stage in flight.** No double buffering, so there is nothing to hide
-  latency behind even within a single stage.
+1. No overlap between loading and computing (`cp.async`), "almost certainly the
+   largest single item."
+2. The block tile is too small.
+3. No shared-memory swizzling.
+4. One K-stage in flight.
+
+B row-major as before. Microseconds per GEMM, CUDA-graph replay, all in one
+process with the hand-written kernel:
+
+| n | wmma+smem | Triton, same tiling | + 3 pipeline stages | + 128x128 tile, 8 warps | + grouped tile order | Triton best |
+|---|---|---|---|---|---|---|
+| 256 | 5.0 | 4.3 | 3.7 | 5.5 | 5.5 | 2.6 |
+| 512 | 8.4 | 6.9 | 5.7 | 8.9 | 8.9 | 4.1 |
+| 1024 | 21.1 | 15.9 | 14.2 | 16.4 | 16.4 | 9.2 |
+| 2048 | 144.8 | 95.0 | 97.7 | 55.8 | 55.8 | 45.1 |
+| 4096 | 1124.8 | 699.2 | 689.3 | 414.2 | 416.5 | 333.4 |
+
+**The first item was wrong.** Three pipeline stages at this tiling changed the
+runtime by 1.01x at 4096 and made it slightly slower at 2048. The compiled kernel
+really does overlap loads with math (its SASS issues `cp.async` loads and the
+one-stage kernel's does not), so this measures the idea, not a knob that silently
+did nothing. Once tiles are staged, this kernel is not waiting on its loads.
+
+**The second was the largest single step.** A 128x128 tile with 8 warps was worth
+1.66x at 4096 and 1.75x at 2048. It is slower at 1024 and below, where there are
+fewer blocks than SMs.
+
+**The third cannot be isolated, but it sits inside the largest gap.** At identical
+tiling and the same register budget (71 registers per thread against 70), the
+Triton kernel is already 1.61x faster at 4096, 1.53x at 2048 and 1.33x at 1024.
+Two differences show in the compiled output: its shared memory is swizzled where
+mine is plain arrays, and it issues a different int8 MMA shape (m16n8k32 against
+wmma's 16x16x16). That is an upper bound on what the two are worth together, not
+a measurement of either.
+
+**The fourth is the same experiment as the first, with the same answer.** Grouped
+tile order, which was not on the list, was worth nothing.
+
+The best Triton kernel (128x128 blocks, 64-wide K tiles, 4 warps, 3 stages,
+grouped order) reaches 412 TOPS at 4096, 3.4x this kernel. And the thing that
+decided the comparison with cuBLAS was not on the list at all.
+
+### Against cuBLAS's fast path
+
+`gemm_i8.cu` calls cuBLAS with B row-major (NN), which is how this backend
+stores it. Int8 tensor-core GEMMs are built around both operands being
+K-contiguous (TN), and an engine chooses its weight layout at load time, the
+same way the CPU engine pre-transposes Linear weights. Same data in both layouts,
+one process, CUDA-graph replay, microseconds:
+
+| n | best hand-written | cuBLAS NN | cuBLAS TN | torch._int_mm TN | Triton best NN | Triton best TN |
+|---|---|---|---|---|---|---|
+| 256 | 3.7 (wmma) | 7.8 | 2.3 | 3.0 | 2.6 | 2.0 |
+| 512 | 6.9 (wmma) | 8.1 | 2.9 | 3.7 | 4.1 | 2.8 |
+| 1024 | 21.1 (wmma+smem) | 24.1 | 9.2 | 7.9 | 9.2 | 7.8 |
+| 2048 | 144.8 (wmma+smem) | 105.0 | 57.5 | 50.1 | 45.1 | 34.5 |
+| 4096 | 1124.8 (wmma+smem) | 857.9 | 249.9 | 251.2 | 333.4 | 254.3 |
+
+**cuBLAS is 1.8x to 3.4x faster in TN,** and in TN it is 1.6x to 4.5x faster than
+the best hand-written kernel at every size. The first table's "ahead of cuBLAS up
+to 1024" is true only of cuBLAS as I called it. At 4096 cuBLAS reaches 550 TOPS.
+
+**The layout costs cuBLAS far more than it costs Triton.** Triton's NN kernel is
+about 1.3x slower than its TN kernel at 2048 and 4096, and the compiled output
+shows a difference: the best NN kernel issues byte permutes and the TN kernel
+issues none. cuBLAS loses 3.4x at 4096 to the same change, so its row-major path
+is a slow path, more than a transposition.
+
+**Triton, given TN, matches the vendor.** Within 2% of cuBLAS at 4096 (540 against
+550 TOPS), and 1.45x faster at 2048 than the fastest vendor path there
+(`torch._int_mm`, which goes through cuBLASLt), at 498 TOPS. At 1024 and below
+every TN implementation is within 1.5 microseconds of the others.
+
+### Back-to-back timing at small sizes
+
+`ni_bench_cuda` times back-to-back launches, which includes each call's host
+cost. From n=2048 up that does not matter: back-to-back and replayed times agree
+within 0.6% for the hand-written kernels and within 7% for everything else. Below
+that it matters a great deal. At 256, cuBLAS TN takes 12.3 microseconds
+back-to-back and 2.3 replayed, so about 10 microseconds of every call is host
+work, enough to make it look 1.5x slower than wmma (7.9 microseconds) when it is
+1.6x faster (2.3 against 3.7). The first table's 2.09x at 256 survives against
+cuBLAS NN either way (2.12x replayed), because that path is slow on the GPU
+itself.
+
+Reproduce with `bash tools/triton_gemm_vm.sh` on a CUDA machine. It builds
+`bench/gemm_shim.cu`, which puts the hand-written kernels in the same process as
+Triton and cuBLAS so all of them share one stream and one timer, and it writes
+`results/triton_gemm_i8.md`. Every implementation must match an exact CPU
+reference at every timed size before it is timed.
 
 The bandwidth figure above is computed from launch geometry and measured time,
 not read off a profiler; see [resource use and occupancy](#resource-use-and-occupancy)
@@ -327,8 +412,11 @@ usually reports. fp32, NCHW, batch 1. `./build-cuda/ni_bench_conv`.
 | pointwise 1x1, 128 to 128, 28x28 | 0.0542 | 0.0490 | **0.0353** | 0.0421 | 0.0435 | 0.0431 | **1.22x** |
 | depthwise 3x3, 128, 28x28 | 0.0072 | **0.0035** | n/a | 0.0219 | 0.0215 | 0.0211 | **6.02x** |
 
-Milliseconds, median of 50 launches. Every implementation is checked against the
-direct kernel's output before timing.
+Milliseconds, mean of 50 back-to-back launches. Every implementation is checked against the
+direct kernel's output before timing. These are small layers timed back-to-back,
+the method that on the GEMM included about 10 microseconds of host cost per
+cuBLAS call at n=256, and cuDNN has per-call host cost too. The three wins have
+not yet been re-timed with host cost excluded.
 
 **Fusion is worth most where the convolution is smallest.** 1.08x on the mid 3x3
 but 2.06x on the depthwise layer. That ordering is the whole point: the
