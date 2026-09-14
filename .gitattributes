@@ -1,0 +1,4 @@
+# Compiled-kernel dumps written by tools/triton_gemm.py. They are assembly and
+# IR listings, not stylesheets, but GitHub reads .sass as Sass and was reporting
+# this repository as mostly Sass.
+results/triton_ir/* linguist-generated=true linguist-detectable=false
